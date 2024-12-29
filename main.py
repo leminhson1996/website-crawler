@@ -25,7 +25,7 @@ class Site(object):
         async with aiohttp.ClientSession() as session:
             async with session.get(self.sitemaps_link, headers=USER_AGENT) as response:
                 if response.status != 200:
-                    self.log_container.write(
+                    self.log_container.markdown(
                         f"Error fetching sitemap: {response.status}")
                     return []
 
@@ -49,18 +49,18 @@ class Site(object):
         async with semaphore:
             async with session.get(sitemap, headers=USER_AGENT) as response:
                 if response.status != 200:
-                    self.log_container.write(
+                    self.log_container.markdown(
                         f"Error fetching sitemap: {response.status}")
                     return []
 
                 soup = BeautifulSoup(await response.text(), "xml")
                 urls = [loc.text for loc in soup.find_all("loc")]
-                self.log_container.write(
+                self.log_container.markdown(
                     f"Found {len(urls)} links in sitemap: {sitemap}")
                 return urls
 
     async def scrape_article(self, session, url):
-        self.log_container.write(f"Fetching article from {url}...")
+        self.log_container.markdown(f"Fetching article from {url}...")
         async with session.get(url, headers=USER_AGENT) as response:
             soup = BeautifulSoup(await response.text(), "html.parser")
 
@@ -69,7 +69,7 @@ class Site(object):
             ) if soup.find("h1") else "No Title"
             tags = [tag.get_text()
                     for tag in soup.select(".article__tag .box-content a")]
-            self.log_container.write(f'tags: {tags}')
+            self.log_container.markdown(f'tags: {tags}')
             datetime_tag = soup.find("cms-date")
             article_datetime = datetime_tag["content"] if datetime_tag else datetime.now(
             ).isoformat()
@@ -102,13 +102,13 @@ class Site(object):
         self.conn.commit()
 
     def save_to_db(self, data):
-        self.log_container.write(f"Saving article to database: {data['url']}")
+        self.log_container.markdown(f"Saving article to database: {data['url']}")
         self.cursor.execute('''INSERT OR IGNORE INTO articles (datetime, site, url, title, content, tags)
                     VALUES (?, ?, ?, ?, ?, ?)''',
                             (data["datetime"], self.domain, data["url"], data["title"], data["content"], data["tags"]))
 
     def update_to_db(self, url, data):
-        self.log_container.write(f"Updating article in database: {url}")
+        self.log_container.markdown(f"Updating article in database: {url}")
         self.cursor.execute('''
             INSERT INTO articles (datetime, site, url, title, content, tags)
             VALUES (?, ?, ?, ?, ?, ?)
@@ -145,7 +145,7 @@ async def fetch_urls(sites, log_container):
     for item in sites:
         site = Site(**item, log_container=log_container)
         site.init_db()
-        log_container.write(f"Fetching root sitemap from {site.domain}...")
+        log_container.markdown(f"Fetching root sitemap from {site.domain}...")
         links = await site.get_all_sitemap_links(concurrent_tasks=MAX_CONCURRENT_SITEMAPS)
         site.save_all_urls(links)
 
@@ -159,7 +159,7 @@ async def crawl_sites(sites, log_container):
             links = site.get_all_urls()
             for link in links:
                 if site.url_content_exists(link):
-                    log_container.write(f"URL content already exists: {link}")
+                    log_container.markdown(f"URL content already exists: {link}")
                     continue
 
                 tasks.append(site.scrape_article(session, link))
@@ -173,7 +173,7 @@ async def crawl_sites(sites, log_container):
                 await asyncio.gather(*tasks)
                 site.conn.commit()
 
-        log_container.write(f"Crawling completed for {site.domain}.")
+        log_container.markdown(f"Crawling completed for {site.domain}.")
         site.done()
 
 
@@ -252,13 +252,13 @@ def main():
         if st.button('Get all urls of sites'):
             sites_to_crawl = parse_info(domains, sitemaps, exclude_urls)
             asyncio.run(fetch_urls(sites_to_crawl, log_container))
-            log_container.write("Done")
+            log_container.markdown("Done")
 
         if st.button('Start Crawling content'):
             sites_to_crawl = parse_info(domains, sitemaps, exclude_urls)
-            log_container.write("Starting the crawl process... Please wait.")
+            log_container.markdown("Starting the crawl process... Please wait.")
             asyncio.run(crawl_sites(sites_to_crawl, log_container))
-            log_container.write("Crawling process completed!")
+            log_container.markdown("Crawling process completed!")
 
     elif tab == "View Data":
         st.header("View Data")
