@@ -7,6 +7,8 @@ import random
 from typing import List
 from datetime import datetime
 from bs4 import BeautifulSoup
+import traceback
+
 
 
 class Site(object):
@@ -104,7 +106,16 @@ class Site(object):
                     self.update_to_db(url, data)
                 return None
         except Exception as e:
-            raise e
+            await self.log(f"Error from {url}: {traceback.print_exc()}")
+            data = {
+                "title": "error",
+                "content": "",
+                "tags": "",
+                "datetime": "",
+                "url": url
+            }
+            # await self.log("Invalid format -> removed")
+            self.update_to_db(url, data)
             # await self.log(e.stack)
             # await self.log("Sleeping for 10 seconds...")
             # await asyncio.sleep(10)
@@ -215,7 +226,7 @@ async def crawl_sites(sites: List[Site]):
             urls = site.get_all_urls()
             for item in urls:
                 link, title = item
-                if site.url_content_exists(link) or title == 'removed':
+                if site.url_content_exists(link) or title == 'error':
                     # await site.log(f"URL content already exists: {link}")
                     continue
 
