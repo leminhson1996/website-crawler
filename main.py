@@ -4,29 +4,27 @@ import sqlite3
 import asyncio
 import aiohttp
 import random
+from typing import List
 from datetime import datetime
 from bs4 import BeautifulSoup
 
-USER_AGENT = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
-}
-
 
 class Site(object):
-    def __init__(self, domain, sitemaps_link, exclude_urls, log_queue, max_concurrent_tasks, max_concurrent_sitemaps):
+    def __init__(self, domain, sitemaps_link, exclude_urls, max_concurrent_tasks, max_concurrent_sitemaps, user_agent):
         self.domain = domain
         self.sitemaps_link = sitemaps_link
         self.exclude_urls = exclude_urls
-        self.log_queue = log_queue
         self.max_concurrent_tasks = max_concurrent_tasks
         self.max_concurrent_sitemaps = max_concurrent_sitemaps
+        self.user_agent = user_agent
+        self.total_posts = 0
 
     async def log(self, message):
-        await self.log_queue.put(message)
+        st.write(message)
 
     async def get_all_sitemap_links(self):
         async with aiohttp.ClientSession() as session:
-            async with session.get(self.sitemaps_link, headers=USER_AGENT) as response:
+            async with session.get(self.sitemaps_link, headers={"User-Agent": self.user_agent}) as response:
                 if response.status != 200:
                     await self.log(f"Error fetching sitemap: {response.status}")
                     return []
@@ -49,7 +47,7 @@ class Site(object):
         if sitemap in self.exclude_urls:
             return []
         async with semaphore:
-            async with session.get(sitemap, headers=USER_AGENT) as response:
+            async with session.get(sitemap, headers={"User-Agent": self.user_agent}) as response:
                 if response.status != 200:
                     await self.log(f"Error fetching sitemap: {response.status}")
                     return []
@@ -58,35 +56,60 @@ class Site(object):
                 urls = [loc.text for loc in soup.find_all("loc")]
                 await self.log(f"Found {len(urls)} links in sitemap: {sitemap}")
                 return urls
+    
+    async def get_article_content(self, response):
+        soup = BeautifulSoup(await response.text(), "html.parser")
+        article = soup.find("div", class_="article__body cms-body")
+        content = None
+        if article:
+            paragraphs = article.find_all("p")
+            content = "\n".join([p.get_text() for p in paragraphs])
+        title = soup.find("h1").get_text(
+        ) if soup.find("h1") else "No Title"
+        tags = [tag.get_text()
+                for tag in soup.select(".article__tag .box-content a")]
+        datetime_tag = soup.find("meta", class_="cms-date")
+        article_datetime = datetime_tag["content"] if datetime_tag else datetime.now(
+        ).isoformat()
+
+        return content, title, tags, article_datetime
 
     async def scrape_article(self, session, url):
-        await self.log(f"Fetching article from {url}...")
-        async with session.get(url, headers=USER_AGENT) as response:
-            soup = BeautifulSoup(await response.text(), "html.parser")
-
-            article = soup.find("div", class_="article__body cms-body")
-            title = soup.find("h1").get_text(
-            ) if soup.find("h1") else "No Title"
-            tags = [tag.get_text()
-                    for tag in soup.select(".article__tag .box-content a")]
-            await self.log(f'tags: {tags}')
-            datetime_tag = soup.find("cms-date")
-            article_datetime = datetime_tag["content"] if datetime_tag else datetime.now(
-            ).isoformat()
-
-            if article:
-                paragraphs = article.find_all("p")
-                full_text = "\n".join([p.get_text() for p in paragraphs])
-                data = {
-                    "title": title,
-                    "content": full_text or article.get_text(),
-                    "tags": ",".join(tags),
-                    "datetime": article_datetime,
-                    "url": url
-                }
-                self.update_to_db(url, data)
-            return None
-
+        await self.log(f"Fetching article from {url}, at {datetime.now()}")
+        try:
+            async with session.get(url, headers={"User-Agent": self.user_agent}) as response:
+                content, title, tags, article_datetime = await self.get_article_content(response)
+                if content and title:
+                    data = {
+                        "title": title,
+                        "content": content,
+                        "tags": ",".join(tags),
+                        "datetime": article_datetime,
+                        "url": url
+                    }
+                    # await self.log(f"Title: {title}, date: {article_datetime}")
+                    self.update_to_db(url, data)
+                    self.total_posts += 1
+                    with st.empty():
+                        await self.log(f'Total posts: {self.total_posts}')
+                else:
+                    data = {
+                        "title": "removed",
+                        "content": "",
+                        "tags": "",
+                        "datetime": "",
+                        "url": url
+                    }
+                    # await self.log("Invalid format -> removed")
+                    self.update_to_db(url, data)
+                return None
+        except Exception as e:
+            raise e
+            # await self.log(e.stack)
+            # await self.log("Sleeping for 10 seconds...")
+            # await asyncio.sleep(10)
+            
+       
     def init_db(self):
         conn = sqlite3.connect("articles.db")
         self.conn = conn
@@ -100,6 +123,7 @@ class Site(object):
                         content TEXT,
                         tags TEXT)''')
         self.conn.commit()
+        self.total_posts = count_total_rows(self.domain, None, None)
 
     def save_to_db(self, data):
         self.cursor.execute('''INSERT OR IGNORE INTO articles (datetime, site, url, title, content, tags)
@@ -126,8 +150,8 @@ class Site(object):
 
     def get_all_urls(self):
         self.cursor.execute(
-            "SELECT url FROM articles WHERE site = ?", (self.domain,))
-        return [row[0] for row in self.cursor.fetchall()]
+            "SELECT url, title FROM articles WHERE site = ?", (self.domain,))
+        return [(row[0], row[1]) for row in self.cursor.fetchall()]
 
     def save_all_urls(self, urls: list):
         for url in urls:
@@ -138,26 +162,61 @@ class Site(object):
     def done(self):
         self.conn.close()
 
+class NhandanSite(Site):
+    def __init__(self):
+        super().__init__("nhandan.vn", "https://nhandan.vn/sitemap.xml", [
+            "https://nhandan.vn/sitemap-article-daily.xml",
+            "https://nhandan.vn/sitemap-news.xml",
+            "https://nhandan.vn/sitemap-category.xml",
+            "https://nhandan.vn/sitemap-event.xml"
+        ], 5, 5, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/")
 
-async def fetch_urls(sites, log_queue):
-    for item in sites:
-        site = Site(**item)
+class DaidoanketSite(Site):
+    def __init__(self):
+        super().__init__("daidoanket.vn", "https://daidoanket.vn/sitemap.xml", [
+            "https://daidoanket.vn/sitemap-article-daily.xml",
+            "https://daidoanket.vn/sitemap-news.xml",
+            "https://daidoanket.vn/sitemap-category.xml",
+            "https://daidoanket.vn/sitemap-event.xml"
+        ], 10, 5, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/")
+
+    async def get_article_content(self, response):
+        soup = BeautifulSoup(await response.text(), "html.parser")
+        content = None
+        article_body = soup.find('div', class_='c-news-detail').find('div', class_='b-maincontent')
+        if article_body:
+            paragraphs = article_body.find_all('p')
+            content = "\n".join([p.get_text() for p in paragraphs])
+        title = soup.find("h1", class_="sc-longform-header-title block-sc-title").get_text()
+        tags_div = soup.find('div', class_='c-widget-tags onecms__tags')
+        tags = [a.get_text() for a in tags_div.find_all('a')]
+        datetime_tag = soup.find(
+            "span", class_="sc-longform-header-date block-sc-publish-time").get_text()
+        article_datetime = datetime_tag if datetime_tag else datetime.now(
+        ).isoformat()
+
+        return content, title, tags, article_datetime
+        
+
+async def fetch_urls(sites: List[Site]):
+    for site in sites:
         site.init_db()
-        await log_queue.put(f"Fetching root sitemap from {site.domain}...")
+        await site.log(f"Fetching root sitemap from {site.domain}...")
         links = await site.get_all_sitemap_links()
         site.save_all_urls(links)
 
 
-async def crawl_sites(sites, log_queue):
-    for item in sites:
-        site = Site(**item)
+async def crawl_sites(sites: List[Site]):
+    for site in sites:
+        # site = Site(**item)
         site.init_db()
         async with aiohttp.ClientSession() as session:
             tasks = []
-            links = site.get_all_urls()
-            for link in links:
-                if site.url_content_exists(link):
-                    await log_queue.put(f"URL content already exists: {link}")
+            urls = site.get_all_urls()
+            for item in urls:
+                link, title = item
+                if site.url_content_exists(link) or title == 'removed':
+                    # await site.log(f"URL content already exists: {link}")
                     continue
 
                 tasks.append(site.scrape_article(session, link))
@@ -171,24 +230,20 @@ async def crawl_sites(sites, log_queue):
                 await asyncio.gather(*tasks)
                 site.conn.commit()
 
-        await log_queue.put(f"Crawling completed for {site.domain}.")
+        await site.log(f"Crawling completed for {site.domain}.")
         site.done()
 
 
-async def log_writer(log_queue, log_container):
-    while True:
-        message = await log_queue.get()
-        if message is None:
-            break
-        log_container.write(message)
-
-
-def parse_info(domains, sitemaps, exclude_urls):
+def parse_info(domains: str)-> List[Site]:
     domain_list = [domain.strip() for domain in domains.split(',')]
-    sitemap_list = [sitemap.strip() for sitemap in sitemaps.split(',')]
-    exclude_url_list = [exclude_url.strip()
-                        for exclude_url in exclude_urls.split(',')]
-    return [{"domain": domain, "sitemaps_link": sitemap, "exclude_urls": exclude_url_list} for domain, sitemap in zip(domain_list, sitemap_list)]
+    sites = []
+    for domain in domain_list:
+        if domain == 'nhandan.vn':
+            site = NhandanSite()
+        elif domain == 'daidoanket.vn':
+            site = DaidoanketSite()
+        sites.append(site)
+    return sites
 
 
 def fetch_data_from_db(page, page_size, site_filter, url_filter, title_filter):
@@ -217,7 +272,7 @@ def fetch_data_from_db(page, page_size, site_filter, url_filter, title_filter):
 def count_total_rows(site_filter, url_filter, title_filter):
     conn = sqlite3.connect("articles.db")
     cursor = conn.cursor()
-    query = "SELECT COUNT(*) FROM articles WHERE 1=1"
+    query = "SELECT COUNT(*) FROM articles WHERE title IS NOT '' AND title IS NOT 'removed'"
     params = []
     if site_filter:
         query += " AND site LIKE ?"
@@ -243,53 +298,51 @@ def run_asyncio_tasks(tasks):
 
 def main():
     st.title('Website Crawling Tool')
-    domains = st.text_area('Enter a list of domains (comma separated)',
-                           value="nhandan.vn",
-                           help="Enter the domain names for crawling, e.g., 'nhandan.vn,example.com'")
 
-    sitemaps = st.text_area('Enter corresponding sitemap links (comma separated)',
-                            value="https://nhandan.vn/sitemaps.xml",
-                            help="Enter the sitemap URLs corresponding to the domains.")
+    st.markdown("### Git Repository")
+    st.markdown(
+        "[git@github.com:leminhson1996/website-crawler.git](git@github.com:leminhson1996/website-crawler.git)")
 
-    exclude_urls = st.text_area('Enter exclude URLs (comma separated)',
-                                value="https://nhandan.vn/sitemaps/categories.xml,https://nhandan.vn/sitemaps/topics.xml",
-                                help="Enter the exclude URLs for each domain.")
+    domains = st.text_area('Enter a list of domains (comma separated), must be in this list: nhandan.vn, daidoanket.vn',
+                           value="daidoanket.vn",
+                           help="Enter the domain names for crawling, e.g., 'nhandan.vn,daidoanket.vn'")
 
-    max_concurrent_tasks = st.number_input(
-        'Enter max concurrent tasks when fetching content', min_value=1, value=1)
-    max_concurrent_sitemaps = st.number_input(
-        'Enter max concurrent tasks when fetching sitemaps urls', min_value=1, value=5)
+    # sitemaps = st.text_area('Enter corresponding sitemap links (comma separated)',
+    #                         value="https://daidoanket.vn/sitemap.xml",
+    #                         help="Enter the sitemap URLs corresponding to the domains.")
+
+    # exclude_urls = st.text_area('Enter exclude URLs (comma separated)',
+    #                             value="https://daidoanket.vn/sitemap-article-daily.xml,https://daidoanket.vn/sitemap-news.xml,https://daidoanket.vn/sitemap-category.xml,https://daidoanket.vn/sitemap-event.xml",
+    #                             help="Enter the exclude URLs for each domain.")
+
+    # user_agent = st.text_input(
+    #     'Enter User-Agent', value="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36")
+
+    # max_concurrent_tasks = st.number_input(
+    #     'Enter max concurrent tasks', min_value=1, value=1)
+    # max_concurrent_sitemaps = st.number_input(
+    #     'Enter max concurrent sitemaps', min_value=1, value=5)
 
     tab = st.sidebar.radio("Navigation", ["Crawl", "View Data"])
 
     log_placeholder = st.empty()
 
     if tab == "Crawl":
-        log_queue = asyncio.Queue()
         with log_placeholder.container() as log_container:
             if st.button('Get all urls of sites'):
-                sites_to_crawl = parse_info(domains, sitemaps, exclude_urls)
-                for site in sites_to_crawl:
-                    site['max_concurrent_tasks'] = max_concurrent_tasks
-                    site['max_concurrent_sitemaps'] = max_concurrent_sitemaps
+                sites_to_crawl = parse_info(domains)
                 run_asyncio_tasks([
-                    fetch_urls(sites_to_crawl, log_queue),
-                    log_writer(log_queue, log_container)
+                    fetch_urls(sites_to_crawl)
                 ])
-                log_queue.put_nowait(None)  # Signal the log writer to stop
+                st.write("Done")
 
             if st.button('Start Crawling content'):
-                sites_to_crawl = parse_info(domains, sitemaps, exclude_urls)
-                for site in sites_to_crawl:
-                    site['max_concurrent_tasks'] = max_concurrent_tasks
-                    site['max_concurrent_sitemaps'] = max_concurrent_sitemaps
-                log_queue.put_nowait(
-                    "Starting the crawl process... Please wait.")
+                sites_to_crawl = parse_info(domains)
+                st.write("Starting the crawl process... Please wait.")
                 run_asyncio_tasks([
-                    crawl_sites(sites_to_crawl, log_queue),
-                    log_writer(log_queue, log_container)
+                    crawl_sites(sites_to_crawl)
                 ])
-                log_queue.put_nowait(None)  # Signal the log writer to stop
+                st.write("Crawling process completed!")
 
     elif tab == "View Data":
         st.header("View Data")
