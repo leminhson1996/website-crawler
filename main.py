@@ -55,41 +55,48 @@ class Site:
                 urls = [loc.text for loc in soup.find_all("loc")]
                 await self.log(f"Found {len(urls)} links in sitemap: {sitemap}")
                 return urls
+    
+    async def get_post_content(self, soup, url):
+        article_body = soup.find(
+            'div', class_='c-news-detail').find('div', class_='b-maincontent')
+        if article_body:
+            paragraphs = article_body.find_all('p')
+            full_text = "\n".join([p.get_text() for p in paragraphs])
+        else:
+            full_text = "No content found"
+
+        header = soup.find(
+            'h1', class_='sc-longform-header-title block-sc-title')
+        title = header.get_text() if header else "No Title"
+        tags_div = soup.find('div', class_='c-widget-tags onecms__tags')
+        tags = [a.get_text()
+                for a in tags_div.find_all('a')] if tags_div else []
+        await self.log(f'tags: {tags}')
+        publish_time = soup.find(
+            'span', class_='sc-longform-header-date block-sc-publish-time')
+        article_datetime = publish_time.get_text(
+        ) if publish_time else datetime.now().isoformat()
+
+        data = {
+            "title": title,
+            "content": full_text,
+            "tags": ",".join(tags),
+            "datetime": article_datetime,
+            "url": url
+        }
+        return data
 
     async def scrape_article(self, session, url):
         await self.log(f"Fetching article from {url}...")
-        async with session.get(url, headers={"User-Agent": self.user_agent}) as response:
-            soup = BeautifulSoup(await response.text(), "html.parser")
-
-            article_body = soup.find(
-                'div', class_='c-news-detail').find('div', class_='b-maincontent')
-            if article_body:
-                paragraphs = article_body.find_all('p')
-                full_text = "\n".join([p.get_text() for p in paragraphs])
-            else:
-                full_text = "No content found"
-
-            header = soup.find(
-                'h1', class_='sc-longform-header-title block-sc-title')
-            title = header.get_text() if header else "No Title"
-            tags_div = soup.find('div', class_='c-widget-tags onecms__tags')
-            tags = [a.get_text()
-                    for a in tags_div.find_all('a')] if tags_div else []
-            await self.log(f'tags: {tags}')
-            publish_time = soup.find(
-                'span', class_='sc-longform-header-date block-sc-publish-time')
-            article_datetime = publish_time.get_text(
-            ) if publish_time else datetime.now().isoformat()
-
-            data = {
-                "title": title,
-                "content": full_text,
-                "tags": ",".join(tags),
-                "datetime": article_datetime,
-                "url": url
-            }
-            self.update_to_db(url, data)
-            return None
+        try:
+            async with session.get(url, headers={"User-Agent": self.user_agent}) as response:
+                soup = BeautifulSoup(await response.text(), "html.parser")
+                data = await self.get_post_content(soup, url)
+                self.update_to_db(url, data)
+        except Exception as e:
+            await self.log(f"Error fetching article from {url}: {e}")
+            await asyncio.sleep(5)
+       
 
     def init_db(self):
         conn = sqlite3.connect("articles.db")
@@ -139,6 +146,12 @@ class Site:
                             url=url, title="", content="", tags=""))
         self.conn.commit()
 
+    def count_valid_posts(self):
+        query = "SELECT COUNT(*) FROM articles WHERE site = ? AND title != ''"
+        self.cursor.execute(query, (self.domain,))
+        result = self.cursor.fetchall()
+        return result[0][0] if result else 0
+    
     def done(self):
         self.conn.close()
 
@@ -215,44 +228,128 @@ class TuoiTreSite(Site):
                     print(f"Found {len(articles)} articles on page {page}")
                     self.save_all_urls(articles)
     
-    async def scrape_article(self, session, url):
-        await self.log(f"Fetching article from {url}...")
-        async with session.get(url, headers={"User-Agent": self.user_agent}) as response:
+    async def get_post_content(self, soup, url):
+        article_body = soup.find(
+               'div', class_='detail-content afcbc-body')
+        if article_body:
+            paragraphs = article_body.find_all('p')
+            full_text = "\n".join([p.get_text() for p in paragraphs])
+        else:
+            full_text = "No content found"
+
+        header = soup.find(
+            'h1', class_='detail-title article-title')
+        title = header.get_text() if header else "error"
+        tags = ''
+
+        # Extract publish date from the div with data-role="publishdate"
+        publish_date_div = soup.find('div', {'data-role': 'publishdate'})
+        article_datetime = publish_date_div.get_text(
+            strip=True) if publish_date_div else datetime.now().isoformat()
+
+        data = {
+            "title": title,
+            "content": full_text,
+            "tags": ",".join(tags),
+            "datetime": article_datetime,
+            "url": url
+        }
+        return data
+    
+
+class ThanhNienSite(Site):
+    def __init__(self, user_agent, category_url):
+        super().__init__("thanhnien.vn", category_url, [], 10, 5, user_agent)
+        self.category_url = category_url
+        self.kinhdoanh_url = "https://thanhnien.vn/timelinelist/18549"
+    
+    async def fetch_page(self, session, url, unique_articles):
+        async with session.get(url) as response:
+            print(f"Fetch news from {url}")
             soup = BeautifulSoup(await response.text(), "html.parser")
+            articles = []
+            for link in soup.select(".box-category-item a[href]"):
+                href = link['href']
+                full_url = f"https://{self.domain}" + href
+                if full_url not in unique_articles:
+                    unique_articles.add(full_url)
+                    articles.append(full_url)
+            print(f"Found {len(articles)} articles on {url}")
+            return articles
 
-            article_body = soup.find(
-                'div', class_='detail-content afcbc-body')
-            if article_body:
-                paragraphs = article_body.find_all('p')
-                full_text = "\n".join([p.get_text() for p in paragraphs])
-            else:
-                full_text = "No content found"
+    async def crawl_category(self, base_url, max_pages=10000):
+        print(f"crawl_category from {base_url}...")
+        tasks = []
+        unique_articles = set()
+        headers = {
+            'accept': 'text/html, */*; q=0.01',
+            'accept-language': 'en-US,en;q=0.9,vi;q=0.8',
+            'cache-control': 'no-cache',
+            'pragma': 'no-cache',
+            'priority': 'u=1, i',
+            'referer': 'https://thanhnien.vn',
+            'sec-ch-ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+            'sec-ch-ua-mobile': '?1',
+            'sec-ch-ua-platform': '"Android"',
+            'sec-fetch-dest': 'empty',
+            'sec-fetch-mode': 'cors',
+            'sec-fetch-site': 'same-origin',
+            'user-agent': 'Mozilla/5.0 (Linux; Android 6.0; Nexus 5 Build/MRA58N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36',
+            'x-requested-with': 'XMLHttpRequest'
+        }
+        async with aiohttp.ClientSession(headers=headers) as session:
+            tasks = []
+            for page in range(7228, max_pages + 1):
+                url = f"{base_url}/{page}.htm"
+                tasks.append(self.fetch_page(session, url, unique_articles))
+                if len(tasks) >= self.max_concurrent_sitemaps:
+                    results = await asyncio.gather(*tasks)
+                    for articles in results:
+                        # if len(articles) == 0:
+                        #     stop = True
+                        #     break
+                        self.save_all_urls(articles)
+                    tasks = []
+            if tasks:
+                results = await asyncio.gather(*tasks)
+                for articles in results:
+                    self.save_all_urls(articles)
 
-            header = soup.find(
-                'h1', class_='detail-title article-title')
-            title = header.get_text() if header else "error"
-            tags = ''
+    async def get_post_content(self, soup, url):
+        article_body = soup.find(
+            'div', class_='detail-content afcbc-body')
+        if article_body:
+            paragraphs = article_body.find_all('p')
+            full_text = "\n".join([p.get_text() for p in paragraphs])
+        else:
+            full_text = "No content found"
 
-            # Extract publish date from the div with data-role="publishdate"
-            publish_date_div = soup.find('div', {'data-role': 'publishdate'})
-            article_datetime = publish_date_div.get_text(strip=True) if publish_date_div else datetime.now().isoformat()
+        header = soup.find(
+            'h1', class_='detail-title').find('span', {'data-role': 'title'})
+        title = header.get_text() if header else "error"
+        tags_div = soup.find('div', class_='detail-tab')
+        tags = [a.get_text()
+                for a in tags_div.find_all('a')] if tags_div else []
 
-            data = {
-                "title": title,
-                "content": full_text,
-                "tags": ",".join(tags),
-                "datetime": article_datetime,
-                "url": url
-            }
-            self.update_to_db(url, data)
-            return None
+        # Extract publish date from the div with data-role="publishdate"
+        publish_date_div = soup.find('div', {'data-role': 'publishdate'})
+        article_datetime = publish_date_div.get_text(
+            strip=True) if publish_date_div else datetime.now().isoformat()
 
+        data = {
+            "title": title,
+            "content": full_text,
+            "tags": ",".join(tags),
+            "datetime": article_datetime,
+            "url": url
+        }
+        return data
 
 async def fetch_urls(sites: List[Site]):
     for site in sites:
         site.init_db()
         await site.log(f"Fetching root sitemap from {site.domain}...")
-        if isinstance(site, TuoiTreSite):
+        if isinstance(site, TuoiTreSite) or isinstance(site, ThanhNienSite):
             await site.crawl_category(site.sitemaps_link)
         else:
             links = await site.get_all_sitemap_links()
@@ -267,13 +364,14 @@ async def crawl_sites(sites: List[Site]):
             links = site.get_all_urls()
             for link in links:
                 if site.url_content_exists(link):
-                    await site.log(f"URL content already exists: {link}")
+                    # await site.log(f"URL content already exists: {link}")
                     continue
 
                 tasks.append(site.scrape_article(session, link))
                 if len(tasks) >= site.max_concurrent_tasks:
                     await asyncio.gather(*tasks)
                     site.conn.commit()
+                    st.write(f"total posts: {site.count_valid_posts()}")
                     tasks = []
                     await asyncio.sleep(random.uniform(1, 3))
 
@@ -350,15 +448,15 @@ def main():
     st.markdown(
         "[git@github.com:leminhson1996/website-crawler.git](git@github.com:leminhson1996/website-crawler.git)")
 
-    sites = ["nhandan.vn", "daidoanket.vn", "vneconomy.vn", "tuoitre.vn"]
+    sites = ["nhandan.vn", "daidoanket.vn", "vneconomy.vn", "tuoitre.vn", "thanhnien.vn"]
     selected_site = st.selectbox("Select a site to crawl", sites)
 
     user_agent = st.text_input(
         'Enter User-Agent', value="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36")
 
     category_url = ""
-    if selected_site == "tuoitre.vn":
-        category_url = st.text_input('Enter category URL for tuoitre.vn')
+    if selected_site in ["tuoitre.vn", "thanhnien.vn"]:
+        category_url = st.text_input('Enter category URL')
 
     tab = st.sidebar.radio("Navigation", ["Crawl", "View Data"])
 
@@ -378,6 +476,11 @@ def main():
                         st.error("Please enter a category URL for tuoitre.vn")
                         return
                     site = TuoiTreSite(user_agent, category_url)
+                elif selected_site == "thanhnien.vn":
+                    if not category_url:
+                        st.error("Please enter a category URL for thanhnien.vn")
+                        return
+                    site = ThanhNienSite(user_agent, category_url)
                 else:
                     st.error("Invalid site selected")
                     return
@@ -399,6 +502,11 @@ def main():
                         st.error("Please enter a category URL for tuoitre.vn")
                         return
                     site = TuoiTreSite(user_agent, category_url)
+                elif selected_site == "thanhnien.vn":
+                    if not category_url:
+                        st.error("Please enter a category URL for tuoitre.vn")
+                        return
+                    site = ThanhNienSite(user_agent, category_url)
                 else:
                     st.error("Invalid site selected")
                     return
