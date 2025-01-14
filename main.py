@@ -185,6 +185,48 @@ class VnEconomySite(Site):
         ], 10, 5, user_agent)
 
 
+class DienDanDoanhNghiepSite(Site):
+    def __init__(self, user_agent):
+        super().__init__("diendandoanhnghiep.vn", "https://diendandoanhnghiep.vn/sitemap.xml", [
+            "https://diendandoanhnghiep.vn/sitemap-article-daily.xml",
+            "https://diendandoanhnghiep.vn/sitemap-news.xml",
+            "https://diendandoanhnghiep.vn/sitemap-category.xml",
+            "https://diendandoanhnghiep.vn/sitemap-event.xml"
+        ], 10, 5, user_agent)
+    
+    async def get_post_content(self, soup, url):
+        article_body = soup.find(
+            'div', class_='entry entry-no-padding')
+        if article_body:
+            paragraphs = article_body.find_all('p')
+            full_text = "\n".join([p.get_text() for p in paragraphs])
+        else:
+            full_text = "No content found"
+
+        header = soup.find(
+            'h1', class_='sc-longform-header-title block-sc-title')
+        title = header.get_text() if header else "error"
+        longform_header = soup.find(
+            'p', class_='sc-longform-header-sapo block-sc-sapo')
+        longform_header_text = longform_header.get_text() if longform_header else ""
+
+        # Extract publish date from the div with data-role="publishdate"
+        publish_date_div = soup.find('span', class_='sc-longform-header-date block-sc-publish-time')
+        article_datetime = publish_date_div.get_text(
+            strip=True) if publish_date_div else datetime.now().isoformat()
+        tags_div = soup.find('div', class_='c-widget-tags onecms__tags')
+        tags = [a.get_text()
+                for a in tags_div.find_all('a')] if tags_div else []
+
+        data = {
+            "title": f"{title} - {longform_header_text} ",
+            "content": full_text,
+            "tags": ",".join(tags),
+            "datetime": article_datetime,
+            "url": url
+        }
+        return data
+        
 class TuoiTreSite(Site):
     def __init__(self, user_agent, category_url):
         super().__init__("tuoitre.vn", category_url, [], 10, 5, user_agent)
@@ -448,7 +490,7 @@ def main():
     st.markdown(
         "[git@github.com:leminhson1996/website-crawler.git](git@github.com:leminhson1996/website-crawler.git)")
 
-    sites = ["nhandan.vn", "daidoanket.vn", "vneconomy.vn", "tuoitre.vn", "thanhnien.vn"]
+    sites = ["nhandan.vn", "daidoanket.vn", "vneconomy.vn", "tuoitre.vn", "thanhnien.vn", "diendandoanhnghiep.vn"]
     selected_site = st.selectbox("Select a site to crawl", sites)
 
     user_agent = st.text_input(
@@ -471,6 +513,8 @@ def main():
                     site = DaidoanketSite(user_agent)
                 elif selected_site == "vneconomy.vn":
                     site = VnEconomySite(user_agent)
+                elif selected_site == "diendandoanhnghiep.vn":
+                    site = DienDanDoanhNghiepSite(user_agent)
                 elif selected_site == "tuoitre.vn":
                     if not category_url:
                         st.error("Please enter a category URL for tuoitre.vn")
@@ -497,6 +541,8 @@ def main():
                     site = DaidoanketSite(user_agent)
                 elif selected_site == "vneconomy.vn":
                     site = VnEconomySite(user_agent)
+                elif selected_site == "diendandoanhnghiep.vn":
+                    site = DienDanDoanhNghiepSite(user_agent)
                 elif selected_site == "tuoitre.vn":
                     if not category_url:
                         st.error("Please enter a category URL for tuoitre.vn")
